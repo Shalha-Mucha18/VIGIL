@@ -1,6 +1,6 @@
 <div align="center">
 
-# WORLD-MONITOR
+# VIGIL
 
 **Your own intelligence terminal. 30 sources. One command. Zero cloud.**
 
