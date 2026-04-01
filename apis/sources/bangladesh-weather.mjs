@@ -79,8 +79,14 @@ const UNIQUE_DISTRICTS = DISTRICTS.filter((d, i, arr) =>
 const LAT_PARAM = UNIQUE_DISTRICTS.map(d => d.lat).join(',');
 const LON_PARAM = UNIQUE_DISTRICTS.map(d => d.lon).join(',');
 
-const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
+const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
+const ARCHIVE_URL  = 'https://archive-api.open-meteo.com/v1/archive';
 const CURRENT_VARS = 'temperature_2m,precipitation,weathercode,windspeed_10m,relativehumidity_2m';
+const DAILY_VARS   = 'temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode';
+
+function isoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
 
 function decodeWMO(code) {
   if (code === 0)                   return 'Clear sky';
@@ -101,27 +107,60 @@ function decodeWMO(code) {
 }
 
 export async function briefing() {
-  const url = `${BASE_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&current=${CURRENT_VARS}&timezone=Asia%2FDhaka`;
-  console.error('[BD-Weather] Fetching URL:', url);
+  // Date range for historical: past 30 days up to yesterday
+  const today     = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const past30    = new Date(today); past30.setDate(today.getDate() - 30);
+  const histStart = isoDate(past30);
+  const histEnd   = isoDate(yesterday);
 
-  const raw = await safeFetch(url, { timeout: 20000, retries: 1 });
+  const forecastUrl = `${FORECAST_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&current=${CURRENT_VARS}&daily=${DAILY_VARS}&forecast_days=7&timezone=Asia%2FDhaka`;
+  const archiveUrl  = `${ARCHIVE_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&daily=${DAILY_VARS}&start_date=${histStart}&end_date=${histEnd}&timezone=Asia%2FDhaka`;
 
-  if (raw?.error) {
+  const [rawForecast, rawArchive] = await Promise.all([
+    safeFetch(forecastUrl, { timeout: 20000, retries: 1 }),
+    safeFetch(archiveUrl,  { timeout: 20000, retries: 1 }),
+  ]);
+
+  if (rawForecast?.error) {
     return {
       source: 'Open-Meteo / Bangladesh Weather',
       timestamp: new Date().toISOString(),
-      error: raw.error,
+      error: rawForecast.error,
     };
   }
 
-  // Open-Meteo returns array for batch requests, single object for single location
-  const results = Array.isArray(raw) ? raw : [raw];
+  const forecastResults = Array.isArray(rawForecast) ? rawForecast : [rawForecast];
+  const archiveResults  = Array.isArray(rawArchive)  ? rawArchive  : [rawArchive];
 
   const districts = UNIQUE_DISTRICTS.map((d, i) => {
-    const r = results[i];
+    const r = forecastResults[i];
     if (!r || !r.current) return { district: d.name, lat: d.lat, lon: d.lon, error: 'no_data' };
 
     const c = r.current;
+
+    // 7-day forecast from forecast API
+    const fday = r.daily;
+    const forecast = fday?.time?.map((date, j) => ({
+      date,
+      maxTempC:        fday.temperature_2m_max?.[j] ?? null,
+      minTempC:        fday.temperature_2m_min?.[j] ?? null,
+      precipitationMm: fday.precipitation_sum?.[j] ?? null,
+      weatherCode:     fday.weathercode?.[j] ?? null,
+      condition:       fday.weathercode?.[j] != null ? decodeWMO(fday.weathercode[j]) : 'Unknown',
+    })) ?? [];
+
+    // 30-day historical from archive API
+    const aday = archiveResults[i]?.daily;
+    const historical = aday?.time?.map((date, j) => ({
+      date,
+      maxTempC:        aday.temperature_2m_max?.[j] ?? null,
+      minTempC:        aday.temperature_2m_min?.[j] ?? null,
+      precipitationMm: aday.precipitation_sum?.[j] ?? null,
+      weatherCode:     aday.weathercode?.[j] ?? null,
+      condition:       aday.weathercode?.[j] != null ? decodeWMO(aday.weathercode[j]) : 'Unknown',
+    })) ?? [];
+
     return {
       district:      d.name,
       lat:           d.lat,
@@ -131,8 +170,10 @@ export async function briefing() {
       windspeedKph:  c.windspeed_10m ?? null,
       humidity:      c.relativehumidity_2m ?? null,
       weatherCode:   c.weathercode ?? null,
-      condition:     decodeWMO(c.weathercode ?? -1),
+      condition:     c.weathercode != null ? decodeWMO(c.weathercode) : 'Unknown',
       observedAt:    c.time ?? null,
+      forecast,      // next 7 days
+      historical,    // past 30 days
     };
   });
 
