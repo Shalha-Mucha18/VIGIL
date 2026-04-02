@@ -107,19 +107,19 @@ function decodeWMO(code) {
 }
 
 export async function briefing() {
-  // Date range for historical: past 30 days up to yesterday
+  // Date range for historical: past 5 years up to yesterday
   const today     = new Date();
   const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
-  const past30    = new Date(today); past30.setDate(today.getDate() - 30);
-  const histStart = isoDate(past30);
+  const past5y    = new Date(today); past5y.setFullYear(today.getFullYear() - 5);
+  const histStart = isoDate(past5y);
   const histEnd   = isoDate(yesterday);
 
-  const forecastUrl = `${FORECAST_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&current=${CURRENT_VARS}&daily=${DAILY_VARS}&forecast_days=7&timezone=Asia%2FDhaka`;
+  const forecastUrl = `${FORECAST_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&current=${CURRENT_VARS}&daily=${DAILY_VARS}&forecast_days=16&timezone=Asia%2FDhaka`;
   const archiveUrl  = `${ARCHIVE_URL}?latitude=${LAT_PARAM}&longitude=${LON_PARAM}&daily=${DAILY_VARS}&start_date=${histStart}&end_date=${histEnd}&timezone=Asia%2FDhaka`;
 
   const [rawForecast, rawArchive] = await Promise.all([
     safeFetch(forecastUrl, { timeout: 20000, retries: 1 }),
-    safeFetch(archiveUrl,  { timeout: 20000, retries: 1 }),
+    safeFetch(archiveUrl,  { timeout: 120000, retries: 1 }),
   ]);
 
   if (rawForecast?.error) {
@@ -127,7 +127,12 @@ export async function briefing() {
       source: 'Open-Meteo / Bangladesh Weather',
       timestamp: new Date().toISOString(),
       error: rawForecast.error,
+      districts: [],
     };
+  }
+
+  if (rawArchive?.error) {
+    console.error('[BD-Weather] Archive fetch failed:', rawArchive.error);
   }
 
   const forecastResults = Array.isArray(rawForecast) ? rawForecast : [rawForecast];
@@ -147,7 +152,6 @@ export async function briefing() {
       minTempC:        fday.temperature_2m_min?.[j] ?? null,
       precipitationMm: fday.precipitation_sum?.[j] ?? null,
       weatherCode:     fday.weathercode?.[j] ?? null,
-      condition:       fday.weathercode?.[j] != null ? decodeWMO(fday.weathercode[j]) : 'Unknown',
     })) ?? [];
 
     // 30-day historical from archive API
@@ -158,7 +162,6 @@ export async function briefing() {
       minTempC:        aday.temperature_2m_min?.[j] ?? null,
       precipitationMm: aday.precipitation_sum?.[j] ?? null,
       weatherCode:     aday.weathercode?.[j] ?? null,
-      condition:       aday.weathercode?.[j] != null ? decodeWMO(aday.weathercode[j]) : 'Unknown',
     })) ?? [];
 
     return {
@@ -226,7 +229,26 @@ export async function briefing() {
   };
 }
 
+function toCSV(data) {
+  const rows = ['district,lat,lon,type,date,maxTempC,minTempC,weatherCode'];
+  for (const d of (data.districts ?? [])) {
+    if (d.error) continue;
+    for (const h of d.historical ?? []) {
+      rows.push(`${d.district},${d.lat},${d.lon},historical,${h.date},${h.maxTempC ?? ''},${h.minTempC ?? ''},${h.weatherCode ?? ''}`);
+    }
+    for (const f of d.forecast ?? []) {
+      rows.push(`${d.district},${d.lat},${d.lon},forecast,${f.date},${f.maxTempC ?? ''},${f.minTempC ?? ''},${f.weatherCode ?? ''}`);
+    }
+  }
+  return rows.join('\n');
+}
+
 if (process.argv[1]?.endsWith('bangladesh-weather.mjs')) {
   const data = await briefing();
-  console.log(JSON.stringify(data, null, 2));
+  const fmt = process.argv[2];
+  if (fmt === '--csv') {
+    console.log(toCSV(data));
+  } else {
+    console.log(JSON.stringify(data, null, 2));
+  }
 }
